@@ -18,7 +18,7 @@ transactions_raw = pd.read_csv('transactions.csv', skiprows=2, skip_blank_lines=
 # Drop empty rows
 transactions_raw = transactions_raw.dropna(how='all')
 
-# Set settlement date as 'date' in datetime format
+# Set settlement date as date in datetime format
 transactions_raw['date'] = pd.to_datetime(transactions_raw['Settlement Date'])
 
 # Replace ' ' with '_' and make all columns lowercase
@@ -76,7 +76,7 @@ buy_mask = symbol_transactions['type'] == 'buy'
 sell_mask = symbol_transactions['type'] == 'sell'
 dividend_mask = symbol_transactions['type'] == 'dividend'
 
-# Make 'quantity' negative for 'sell' transactions
+# Make quantity negative for sell transactions
 symbol_transactions.loc[sell_mask, 'quantity'] = -symbol_transactions.loc[sell_mask, 'quantity']
 
 # Ensure transactions are sorted by date
@@ -115,14 +115,14 @@ symbol_transactions['cumulative_total_cost'] = symbol_transactions.groupby('symb
 # Calculate average cost basis per share for each symbol
 symbol_transactions['avg_cost_basis_per_share'] = symbol_transactions['cumulative_total_cost'] / symbol_transactions['cumulative_quantity']
 
-# Adjust 'avg_cost_basis_per_share' for sell transactions to use the 'cumulative_quantity' and 'cumulative_total_cost' from the previous day
+# Adjust average cost basis per share for sell transactions to use the cumulative quantity and cumulative total cost from the previous day
 prev_day_cumulative_quantity = symbol_transactions.groupby('symbol')['cumulative_quantity'].shift(1)
 prev_day_cumulative_total_cost = symbol_transactions.groupby('symbol')['cumulative_total_cost'].shift(1)
 sell_mask_prev_day_quantity = sell_mask & (prev_day_cumulative_quantity > 0)
 
 symbol_transactions.loc[sell_mask_prev_day_quantity, 'avg_cost_basis_per_share'] = prev_day_cumulative_total_cost / prev_day_cumulative_quantity
 
-# Forward fill avg_cost_basis_per_share by symbol
+# Forward fill average cost basis per share by symbol
 symbol_transactions['avg_cost_basis_per_share'] = symbol_transactions.groupby('symbol')['avg_cost_basis_per_share'].ffill()
 
 # Calculate sales proceeds net of fees for sell transactions
@@ -137,7 +137,7 @@ symbol_transactions.loc[sell_mask, 'cumulative_total_cost'] -= symbol_transactio
 # Initialize realized returns to NaN
 symbol_transactions['realized_returns'] = np.nan
 
-# Calculate realized returns (net of fees, including dividends if sold) only when both 'sell_cost_basis' and 'sales_proceeds' are not null
+# Calculate realized returns (net of fees, including dividends if sold) only when both sell cost basis and sales proceeds are not null
 sell_mask_realized_return = (sell_mask) & (symbol_transactions['sell_cost_basis'].notnull()) & (symbol_transactions['sales_proceeds'].notnull())
 symbol_transactions.loc[sell_mask_realized_return, 'realized_returns'] = (symbol_transactions.loc[sell_mask_realized_return, 'sales_proceeds'] + symbol_transactions.loc[sell_mask_realized_return, 'dividends']) / symbol_transactions.loc[sell_mask_realized_return, 'sell_cost_basis'] - 1
 
@@ -185,7 +185,7 @@ prices = yf.download(symbols_list, start=start_date, end=end_date)['Adj Close']
 # Reset the index to create a column for the dates
 prices.reset_index(inplace=True)
 
-# Rename the 'Date' column to 'date' to match the transactions DataFrame
+# Rename the date column to match the transactions DataFrame
 prices = prices.rename(columns={'Date': 'date'}) # type: ignore
 
 # Melt the prices DataFrame
@@ -193,6 +193,12 @@ prices = prices.melt(id_vars='date', var_name='symbol', value_name='adj_close')
 
 # Merge the transactions and prices dataframes
 transactions = pd.merge(transactions, prices, how='left', on=['symbol', 'date'])
+
+# Identify the latest date with available closing price
+last_valid_date = transactions['date'].loc[transactions['adj_close'].notnull()].iloc[-1]
+
+# Remove the time component from dates
+transactions['date'] = transactions['date'].dt.date
 
 # Forward fill the adjusted closing prices
 transactions['adj_close'] = transactions.groupby('symbol')['adj_close'].ffill()
@@ -203,11 +209,14 @@ transactions['daily_value'] = transactions['cumulative_quantity'] * transactions
 # Calculate daily portfolio value including cash
 portfolio_value = transactions.groupby('date').apply(lambda x: x['daily_value'].sum() + x['cumulative_cash'].iloc[-1])
 
+# Change column name to 'Portfolio Value ($)'
+portfolio_value = portfolio_value.rename('Portfolio Value ($)')
+
 # Calculate daily portfolio returns
 portfolio_returns = portfolio_value.pct_change().dropna()
 
-# Change column name to 'Portfolio Value ($)'
-portfolio_value = portfolio_value.rename('Portfolio Value ($)')
+# Change column name to 'Portfolio Return ($)'
+portfolio_returns = portfolio_returns.rename('Portfolio Return')
 
 # Create a summary DataFrame
 summary = transactions.groupby('symbol').last()
@@ -225,15 +234,40 @@ summary = summary[['Quantity', 'Current Price', 'Current Value', 'Realized Retur
 # Convert realized returns to percentages and round to two decimal places
 summary['Realized Return'] = summary['Realized Return'].apply(lambda x: '{:.2%}'.format(x) if pd.notnull(x) else '-')
 
+# Round quantity to integer
+summary['Quantity'] = summary['Quantity'].apply(lambda x: '{:,.0f}'.format(x) if pd.notnull(x) else '-')
+
 # Round the other summary values to two decimal places and add thousands separators
-summary[['Quantity', 'Current Price', 'Current Value', 'Dividends Received']] = summary[['Quantity', 'Current Price', 'Current Value', 'Dividends Received']].applymap(
+summary[['Current Price', 'Current Value', 'Dividends Received']] = summary[['Current Price', 'Current Value', 'Dividends Received']].applymap(
     lambda x: '{:,.2f}'.format(x) if pd.notnull(x) else '-')
+
+# Calculate total return using the first and latest portfolio value (does not work if more cash has been deposited)
+total_return = portfolio_value.iloc[-1] / portfolio_value.iloc[0] - 1
+
+# Set page layout to wide
+st.set_page_config(layout='wide')
 
 # Create streamlit display elements
 st.title('Portfolio Dashboard')
 
-st.metric(label='Portfolio Value', value='${:,.2f}'.format(portfolio_value.iloc[-1]), delta='${:,.2f}'.format(portfolio_value.iloc[-1] - portfolio_value.iloc[0]))
+st.caption(f'Data provided as of market close on {last_valid_date: %m-%d-%Y}')
 
-st.area_chart(data = portfolio_value)
+col1, col2 = st.columns(2)
 
-st.dataframe(summary)
+with col1:
+    st.subheader('Summary')
+    st.dataframe(summary)
+
+with col2:
+    subcol1, subcol2 = st.columns(2)
+    with subcol1:
+        st.metric(label=f'Portfolio Value', value='${:,.0f}'.format(portfolio_value.iloc[-1]), delta='${:,.0f}'.format(portfolio_value.iloc[-1] - portfolio_value.iloc[0]))
+    with subcol2:
+        st.metric(label=f'Total Return', value='{:.2%}'.format(total_return))
+    st.area_chart(data = portfolio_value)
+
+# st.dataframe(portfolio_value)
+
+# st.dataframe(portfolio_returns)
+
+# st.dataframe(transactions[transactions['symbol']=='USIG'])
