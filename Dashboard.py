@@ -186,7 +186,7 @@ prices = yf.download(symbols_list, start=start_date, end=end_date)['Adj Close']
 prices.reset_index(inplace=True)
 
 # Rename the 'Date' column to 'date' to match the transactions DataFrame
-prices.rename(columns={'Date': 'date'}, inplace=True)
+prices = prices.rename(columns={'Date': 'date'}) # type: ignore
 
 # Melt the prices DataFrame
 prices = prices.melt(id_vars='date', var_name='symbol', value_name='adj_close')
@@ -199,9 +199,6 @@ transactions['adj_close'] = transactions.groupby('symbol')['adj_close'].ffill()
 
 # Calculate daily values of each holding
 transactions['daily_value'] = transactions['cumulative_quantity'] * transactions['adj_close']
-
-# # Calculate daily portfolio value including cash
-# portfolio_value = transactions.groupby('date')['daily_value'].sum() + transactions.set_index('date')['cumulative_cash']
 
 # Calculate daily portfolio value including cash
 portfolio_value = transactions.groupby('date').apply(lambda x: x['daily_value'].sum() + x['cumulative_cash'].iloc[-1])
@@ -225,11 +222,18 @@ summary.loc['Cash', 'Current Value'] = transactions['cumulative_cash'].iloc[-1]
 # Show only the columns we're interested in
 summary = summary[['Quantity', 'Current Price', 'Current Value', 'Realized Return', 'Dividends Received']]
 
-summary = summary.round(2)
+# Convert realized returns to percentages and round to two decimal places
+summary['Realized Return'] = summary['Realized Return'].apply(lambda x: '{:.2%}'.format(x) if pd.notnull(x) else '-')
+
+# Round the other summary values to two decimal places and add thousands separators
+summary[['Quantity', 'Current Price', 'Current Value', 'Dividends Received']] = summary[['Quantity', 'Current Price', 'Current Value', 'Dividends Received']].applymap(
+    lambda x: '{:,.2f}'.format(x) if pd.notnull(x) else '-')
 
 # Create streamlit display elements
 st.title('Portfolio Dashboard')
-st.metric(label='Portfolio Value', value=portfolio_value.iloc[-1].round(2))
+
+st.metric(label='Portfolio Value', value='${:,.2f}'.format(portfolio_value.iloc[-1]), delta='${:,.2f}'.format(portfolio_value.iloc[-1] - portfolio_value.iloc[0]))
+
 st.area_chart(data = portfolio_value)
 
 st.dataframe(summary)
