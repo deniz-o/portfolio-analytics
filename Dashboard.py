@@ -5,6 +5,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import yfinance as yf
 from datetime import datetime, date, timedelta
+import pandas_datareader as web
+
+# Set page layout to wide
+st.set_page_config(layout='wide')
 
 # Get the absolute path to the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -134,18 +138,19 @@ symbol_transactions.loc[sell_mask, 'sell_cost_basis'] = symbol_transactions.loc[
 # Subtract cost basis of sold shares from cumulative total cost for each symbol
 symbol_transactions.loc[sell_mask, 'cumulative_total_cost'] -= symbol_transactions.loc[sell_mask, 'sell_cost_basis']
 
-# Initialize realized returns to NaN
+# Initialize realized gains and realized returns to NaN
+symbol_transactions['realized_gains'] = np.nan
 symbol_transactions['realized_returns'] = np.nan
 
-# Calculate realized returns (net of fees, including dividends if sold) only when both sell cost basis and sales proceeds are not null
+# Calculate realized gains in dollars and realized returns (net of fees, including dividends if sold) 
+# only when both sell cost basis and sales proceeds are not null
 sell_mask_realized_return = (sell_mask) & (symbol_transactions['sell_cost_basis'].notnull()) & (symbol_transactions['sales_proceeds'].notnull())
-symbol_transactions.loc[sell_mask_realized_return, 'realized_returns'] = (symbol_transactions.loc[sell_mask_realized_return, 'sales_proceeds'] + symbol_transactions.loc[sell_mask_realized_return, 'dividends']) / symbol_transactions.loc[sell_mask_realized_return, 'sell_cost_basis'] - 1
+symbol_transactions.loc[sell_mask_realized_return, 'realized_gains'] = symbol_transactions.loc[sell_mask_realized_return, 'sales_proceeds'] + symbol_transactions.loc[sell_mask_realized_return, 'dividends']
+symbol_transactions.loc[sell_mask_realized_return, 'realized_returns'] = symbol_transactions.loc[sell_mask_realized_return, 'realized_gains'] / symbol_transactions.loc[sell_mask_realized_return, 'sell_cost_basis'] - 1
 
-# Forward fill realized returns by symbol
+# Forward fill realized gains and realized returns by symbol
+symbol_transactions['realized_gains'] = symbol_transactions.groupby('symbol')['realized_gains'].ffill()
 symbol_transactions['realized_returns'] = symbol_transactions.groupby('symbol')['realized_returns'].ffill()
-
-# Calculate dollar amount realized returns
-symbol_transactions['dollar_realized_returns'] = symbol_transactions['realized_returns'] * symbol_transactions['total_cost']
 
 # Group non-symbol transactions by type and calculate cumulative total
 non_symbol_transactions['cumulative_total'] = non_symbol_transactions.groupby('type')['net_amount'].cumsum()
@@ -209,13 +214,16 @@ transactions['daily_value'] = transactions['cumulative_quantity'] * transactions
 # Calculate daily portfolio value including cash
 portfolio_value = transactions.groupby('date').apply(lambda x: x['daily_value'].sum() + x['cumulative_cash'].iloc[-1])
 
-# Change column name to 'Portfolio Value ($)'
-portfolio_value = portfolio_value.rename('Portfolio Value ($)')
+# Change column name to 'Portfolio Value'
+portfolio_value = portfolio_value.rename('Portfolio Value')
+
+# Convert date index to datetime
+portfolio_value.index = pd.to_datetime(portfolio_value.index)
 
 # Calculate daily portfolio returns
 portfolio_returns = portfolio_value.pct_change().dropna()
 
-# Change column name to 'Portfolio Return ($)'
+# Change column name to 'Portfolio Return'
 portfolio_returns = portfolio_returns.rename('Portfolio Return')
 
 # Create a summary DataFrame
@@ -225,8 +233,18 @@ summary = transactions.groupby('symbol').last()
 summary = summary.rename(columns={'symbol': 'Symbol', 'cumulative_quantity': 'Quantity', 'adj_close': 'Current Price', 'daily_value': 'Current Value',
                         'realized_returns': 'Realized Return', 'dividends': 'Dividends Received'})
 
-# Add the latest cash value to the summary DataFrame
-summary.loc['Cash', 'Current Value'] = transactions['cumulative_cash'].iloc[-1]
+# Sort the holdings by quantity
+summary = summary.sort_values('Quantity', ascending=False)
+
+# # Add the latest cash value to the summary DataFrame
+# summary.loc['Cash', 'Current Value'] = transactions['cumulative_cash'].iloc[-1]
+
+# Create a dataframe for cash
+cash_df = pd.DataFrame(index=['Cash'], columns=['Current Value'])
+cash_df.loc['Cash', 'Current Value'] = transactions['cumulative_cash'].iloc[-1]
+
+# Concatenate cash_df with the rest of the summary dataframe
+summary = pd.concat([cash_df, summary])
 
 # Show only the columns we're interested in
 summary = summary[['Quantity', 'Current Price', 'Current Value', 'Realized Return', 'Dividends Received']]
@@ -244,8 +262,53 @@ summary[['Current Price', 'Current Value', 'Dividends Received']] = summary[['Cu
 # Calculate total return using the first and latest portfolio value (does not work if more cash has been deposited)
 total_return = portfolio_value.iloc[-1] / portfolio_value.iloc[0] - 1
 
-# Set page layout to wide
-st.set_page_config(layout='wide')
+# Load daily price data for S&P 500 to use as a benchmark
+benchmark_daily = yf.download('^GSPC', start=start_date, end=end_date)['Adj Close']
+
+# Change column name to 'S&P 500'
+benchmark_daily = benchmark_daily.rename('S&P 500')
+
+# Calculate daily benchmark returns
+benchmark_returns_daily = benchmark_daily.pct_change().dropna()
+
+# Merge with portfolio returns to create a dataframe with both
+portfolio_benchmark_returns_daily = pd.merge(portfolio_returns, benchmark_returns_daily, how='left', left_index=True, right_index=True)
+
+# Fill NaN with zero for benchmark returns
+portfolio_benchmark_returns_daily['S&P 500'] = portfolio_benchmark_returns_daily['S&P 500'].fillna(0)
+
+# Load daily 3-month Treasury Bill data to use as the risk-free rate
+rf = web.DataReader('TB3MS', 'fred',start=start_date, end=end_date)
+
+# Convert to monthly returns
+rf = (1 + (rf / 100)) ** (1 / 12) - 1 
+rf = rf.resample('M').last()
+# st.write(rf)
+
+# Calculate monthly benchmark returns
+benchmark_returns_monthly = benchmark_daily.resample('M').last().pct_change().dropna()
+# st.write(benchmark_returns_monthly)
+
+# Calculate monthly portfolio returns
+portfolio_returns_monthly = portfolio_value.resample('M').last().pct_change().dropna()
+
+# Change column name to 'Portfolio Return'
+portfolio_returns_monthly = portfolio_returns_monthly.rename('Portfolio Return')
+# st.write(portfolio_returns_monthly)
+
+# Merge monthly risk-free rate, portfolio returns, benchmark returns
+monthly_returns = pd.merge(rf, portfolio_returns_monthly, how='left', left_index=True, right_index=True)
+monthly_returns = pd.merge(monthly_returns, benchmark_returns_monthly, how='left', left_index=True, right_index=True)
+
+# Calculate excess returns over risk-free rate
+monthly_returns['excess_return'] = monthly_returns['Portfolio Return'] - monthly_returns['TB3MS']
+# st.write(monthly_returns)
+
+# Calculate standard deviation of excess returns
+std_excess_return = monthly_returns['excess_return'].std()
+
+# Calculate Sharpe ratio for the period
+sharpe_ratio = monthly_returns['excess_return'].mean() / std_excess_return
 
 # Create streamlit display elements
 st.title('Portfolio Dashboard')
@@ -259,15 +322,15 @@ with col1:
     st.dataframe(summary)
 
 with col2:
-    subcol1, subcol2 = st.columns(2)
-    with subcol1:
+    metriccol1, metriccol2, metriccol3 = st.columns(3)
+    with metriccol1:
         st.metric(label=f'Portfolio Value', value='${:,.0f}'.format(portfolio_value.iloc[-1]), delta='${:,.0f}'.format(portfolio_value.iloc[-1] - portfolio_value.iloc[0]))
-    with subcol2:
+    with metriccol2:
         st.metric(label=f'Total Return', value='{:.2%}'.format(total_return))
+    with metriccol3:
+        st.metric(label=f'Sharpe Ratio', value='{:.2f}'.format(sharpe_ratio))
     st.area_chart(data = portfolio_value)
 
 # st.dataframe(portfolio_value)
 
 # st.dataframe(portfolio_returns)
-
-# st.dataframe(transactions[transactions['symbol']=='USIG'])

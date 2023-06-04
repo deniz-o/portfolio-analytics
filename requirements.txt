@@ -4,3 +4,4 @@ streamlit
 matplotlib
 seaborn
 yfinance
+pandas_datareader
