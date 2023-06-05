@@ -190,10 +190,10 @@ prices = yf.download(symbols_list, start=start_date, end=end_date)['Adj Close']
 # Reset the index to create a column for the dates
 prices.reset_index(inplace=True)
 
-# Rename the date column to match the transactions DataFrame
+# Rename the date column to match the transactions dataframe
 prices = prices.rename(columns={'Date': 'date'}) # type: ignore
 
-# Melt the prices DataFrame
+# Melt the prices dataframe
 prices = prices.melt(id_vars='date', var_name='symbol', value_name='adj_close')
 
 # Merge the transactions and prices dataframes
@@ -226,7 +226,7 @@ portfolio_returns = portfolio_value.pct_change().dropna()
 # Change column name to 'Portfolio Return'
 portfolio_returns = portfolio_returns.rename('Portfolio Return')
 
-# Create a summary DataFrame
+# Create a summary dataframe
 summary = transactions.groupby('symbol').last()
 
 # Rename columns
@@ -236,7 +236,7 @@ summary = summary.rename(columns={'symbol': 'Symbol', 'cumulative_quantity': 'Qu
 # Sort the holdings by quantity
 summary = summary.sort_values('Quantity', ascending=False)
 
-# # Add the latest cash value to the summary DataFrame
+# # Add the latest cash value to the summary dataframe
 # summary.loc['Cash', 'Current Value'] = transactions['cumulative_cash'].iloc[-1]
 
 # Create a dataframe for cash
@@ -297,18 +297,20 @@ portfolio_returns_monthly = portfolio_returns_monthly.rename('Portfolio Return')
 # st.write(portfolio_returns_monthly)
 
 # Merge monthly risk-free rate, portfolio returns, benchmark returns
-monthly_returns = pd.merge(rf, portfolio_returns_monthly, how='left', left_index=True, right_index=True)
-monthly_returns = pd.merge(monthly_returns, benchmark_returns_monthly, how='left', left_index=True, right_index=True)
+monthly_returns = rf.join(portfolio_returns_monthly, how='left').join(benchmark_returns_monthly, how='left')
 
 # Calculate excess returns over risk-free rate
 monthly_returns['excess_return'] = monthly_returns['Portfolio Return'] - monthly_returns['TB3MS']
-# st.write(monthly_returns)
+st.write(monthly_returns)
 
 # Calculate standard deviation of excess returns
-std_excess_return = monthly_returns['excess_return'].std()
+std_monthly_excess_return = monthly_returns['excess_return'].std()
 
-# Calculate Sharpe ratio for the period
-sharpe_ratio = monthly_returns['excess_return'].mean() / std_excess_return
+# Calculate realized Sharpe ratio for the period
+sharpe_ratio_monthly = monthly_returns['excess_return'].mean() / std_monthly_excess_return
+
+# Annualize Sharpe ratio
+sharpe_ratio = sharpe_ratio_monthly * np.sqrt(12)
 
 # Create streamlit display elements
 st.title('Portfolio Dashboard')
