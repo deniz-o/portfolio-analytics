@@ -1,11 +1,15 @@
 import os
-import streamlit as st
+from datetime import datetime, date, timedelta
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
 import matplotlib.pyplot as plt
-import yfinance as yf
-from datetime import datetime, date, timedelta
+
 import pandas_datareader as web
+import streamlit as st
+import yfinance as yf
+
+from transaction_utils import load_and_preprocess_transactions, categorize_transactions, process_symbol_transactions, calculate_cash, load_daily_prices, calculate_holding_metrics, calculate_daily_portfolio_returns, create_summary_table, load_benchmark_data
 
 # Set page layout to wide
 st.set_page_config(layout='wide')
@@ -16,40 +20,8 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 # Change the working directory to the script directory
 os.chdir(script_dir)
 
-# Load raw transactions data
-transactions_raw = pd.read_csv('transactions.csv', skiprows=2, skip_blank_lines=True)
-
-# Drop empty rows
-transactions_raw = transactions_raw.dropna(how='all')
-
-# Set settlement date as date in datetime format
-transactions_raw['date'] = pd.to_datetime(transactions_raw['Settlement Date'])
-
-# Replace ' ' with '_' and make all columns lowercase
-transactions_raw.columns= transactions_raw.columns.str.replace(' ','_').str.lower()
-
-# Subset transactions data to only include 'date', 'description', 'net_amount, 'security_id', 'quantity', 'price', 'commission/fees'
-transactions = transactions_raw[['date', 'description', 'net_amount', 'security_id', 'quantity', 'price', 'commission/fees']]
-
-# Rename columns
-transactions = transactions.rename(columns={'security_id':'symbol', 'commission/fees':'fees'})
-
-# Define function to categorize transactions
-def categorize_transactions(row):
-    if 'buy' in row['description'].lower():
-        return 'buy'
-    elif 'sell' in row['description'].lower():
-        return 'sell'
-    elif 'dividend' in row['description'].lower():
-        return 'dividend'
-    elif 'deposit' in row['description'].lower():
-        return 'deposit'
-    elif 'withdrawal' in row['description'].lower():
-        return 'withdrawal'
-    elif 'fee' in row['description'].lower():
-        return 'fee'
-    else:
-        return 'other'
+# Load and preprocess transactions data
+transactions = load_and_preprocess_transactions('transactions.csv')
 
 # Apply function to categorize transactions
 transactions.loc[:, 'type'] = transactions.apply(categorize_transactions, axis=1)
@@ -58,99 +30,15 @@ transactions.loc[:, 'type'] = transactions.apply(categorize_transactions, axis=1
 symbol_transactions = transactions[transactions['symbol'].notna()].copy()
 non_symbol_transactions = transactions[transactions['symbol'].isna()].copy()
 
-# Convert 'net_amount' to numeric
-symbol_transactions['net_amount'] = pd.to_numeric(symbol_transactions['net_amount'].str.replace(',', ''), errors='coerce')
-non_symbol_transactions['net_amount'] = pd.to_numeric(non_symbol_transactions['net_amount'].str.replace(',', ''), errors='coerce')
+# Create the list of symbols
+symbols = symbol_transactions.symbol.unique().tolist()
 
-# Set date range and create a dataframe with daily data for each symbol
+# Set date range
 start_date = transactions.date.min()
 end_date = datetime.now().date()
-date_range = pd.date_range(start=start_date, end=end_date)
-symbols = symbol_transactions.symbol.unique()
 
-idx = pd.MultiIndex.from_product([symbols, date_range], names=['symbol', 'date'])
-daily_data = pd.DataFrame(index=idx).reset_index()
-
-# Merge daily data with symbol transactions
-symbol_transactions = pd.merge(daily_data, symbol_transactions, on=['symbol', 'date'], how='left')
-symbol_transactions['symbol'] = symbol_transactions['symbol'].ffill()
-
-# Create masks for symbol transactions
-buy_mask = symbol_transactions['type'] == 'buy'
-sell_mask = symbol_transactions['type'] == 'sell'
-dividend_mask = symbol_transactions['type'] == 'dividend'
-
-# Make quantity negative for sell transactions
-symbol_transactions.loc[sell_mask, 'quantity'] = -symbol_transactions.loc[sell_mask, 'quantity']
-
-# Ensure transactions are sorted by date
-transactions = transactions.sort_values('date')
-
-# Fill NaN with 0 for quantity
-symbol_transactions['quantity'] = symbol_transactions['quantity'].fillna(0)
-
-# Calculate cumulative quantity for each symbol, forward fill and fill NaN with 0
-symbol_transactions['cumulative_quantity'] = symbol_transactions.groupby('symbol')['quantity'].cumsum().fillna(0)
-
-# Calculate dividends received for each symbol
-symbol_transactions.loc[dividend_mask, 'dividends'] = symbol_transactions.loc[dividend_mask, 'net_amount'].groupby(symbol_transactions['symbol']).cumsum()
-
-# Forward fill dividends by symbol and fill NaN with 0
-symbol_transactions['dividends'] = symbol_transactions.groupby('symbol')['dividends'].ffill().fillna(0)
-
-# Calculate average buy price (excluding fees) per share for each symbol
-symbol_transactions.loc[buy_mask, 'avg_buy_price'] = (symbol_transactions.loc[buy_mask, 'quantity'] * symbol_transactions.loc[buy_mask, 'price']).groupby(symbol_transactions['symbol']).cumsum() / symbol_transactions.loc[buy_mask].groupby('symbol')['quantity'].cumsum()
-
-# Forward fill average buy price (excluding fees) per share by symbol
-symbol_transactions['avg_buy_price'] = symbol_transactions.groupby('symbol')['avg_buy_price'].ffill()
-
-# Calculate average sell price (excluding fees) for each symbol
-symbol_transactions.loc[sell_mask, 'avg_sell_price'] = (symbol_transactions.loc[sell_mask, 'price'] * - symbol_transactions.loc[sell_mask, 'quantity']) / symbol_transactions.loc[sell_mask, 'quantity'].abs()
-
-# Forward fill average sell price (excluding fees) by symbol
-symbol_transactions['avg_sell_price'] = symbol_transactions.groupby('symbol')['avg_sell_price'].ffill()
-
-# Calculate total cost for each buy transaction
-symbol_transactions.loc[buy_mask, 'total_cost'] = symbol_transactions.loc[buy_mask, 'price'] * symbol_transactions.loc[buy_mask, 'quantity'] - symbol_transactions.loc[buy_mask, 'fees']
-
-# Calculate cumulative total cost for each symbol, forward fill and fill NaN with 0
-symbol_transactions['cumulative_total_cost'] = symbol_transactions.groupby('symbol')['total_cost'].cumsum().ffill().fillna(0)
-
-# Calculate average cost basis per share for each symbol
-symbol_transactions['avg_cost_basis_per_share'] = symbol_transactions['cumulative_total_cost'] / symbol_transactions['cumulative_quantity']
-
-# Adjust average cost basis per share for sell transactions to use the cumulative quantity and cumulative total cost from the previous day
-prev_day_cumulative_quantity = symbol_transactions.groupby('symbol')['cumulative_quantity'].shift(1)
-prev_day_cumulative_total_cost = symbol_transactions.groupby('symbol')['cumulative_total_cost'].shift(1)
-sell_mask_prev_day_quantity = sell_mask & (prev_day_cumulative_quantity > 0)
-
-symbol_transactions.loc[sell_mask_prev_day_quantity, 'avg_cost_basis_per_share'] = prev_day_cumulative_total_cost / prev_day_cumulative_quantity
-
-# Forward fill average cost basis per share by symbol
-symbol_transactions['avg_cost_basis_per_share'] = symbol_transactions.groupby('symbol')['avg_cost_basis_per_share'].ffill()
-
-# Calculate sales proceeds net of fees for sell transactions
-symbol_transactions.loc[sell_mask, 'sales_proceeds'] = (symbol_transactions.loc[sell_mask, 'price'] * - symbol_transactions.loc[sell_mask, 'quantity']) + symbol_transactions.loc[sell_mask, 'fees']
-
-# For each sell transaction, calculate cost basis of sold shares based on average cost basis per share at the time of sale
-symbol_transactions.loc[sell_mask, 'sell_cost_basis'] = symbol_transactions.loc[sell_mask, 'avg_cost_basis_per_share'] * -symbol_transactions.loc[sell_mask, 'quantity']
-
-# Subtract cost basis of sold shares from cumulative total cost for each symbol
-symbol_transactions.loc[sell_mask, 'cumulative_total_cost'] -= symbol_transactions.loc[sell_mask, 'sell_cost_basis']
-
-# Initialize realized gains and realized returns to NaN
-symbol_transactions['realized_gains'] = np.nan
-symbol_transactions['realized_returns'] = np.nan
-
-# Calculate realized gains in dollars and realized returns (net of fees, including dividends if sold) 
-# only when both sell cost basis and sales proceeds are not null
-sell_mask_realized_return = (sell_mask) & (symbol_transactions['sell_cost_basis'].notnull()) & (symbol_transactions['sales_proceeds'].notnull())
-symbol_transactions.loc[sell_mask_realized_return, 'realized_gains'] = symbol_transactions.loc[sell_mask_realized_return, 'sales_proceeds'] + symbol_transactions.loc[sell_mask_realized_return, 'dividends']
-symbol_transactions.loc[sell_mask_realized_return, 'realized_returns'] = symbol_transactions.loc[sell_mask_realized_return, 'realized_gains'] / symbol_transactions.loc[sell_mask_realized_return, 'sell_cost_basis'] - 1
-
-# Forward fill realized gains and realized returns by symbol
-symbol_transactions['realized_gains'] = symbol_transactions.groupby('symbol')['realized_gains'].ffill()
-symbol_transactions['realized_returns'] = symbol_transactions.groupby('symbol')['realized_returns'].ffill()
+# Process symbol transactions
+symbol_transactions = process_symbol_transactions(symbol_transactions, start_date, end_date)
 
 # Group non-symbol transactions by type and calculate cumulative total
 non_symbol_transactions['cumulative_total'] = non_symbol_transactions.groupby('type')['net_amount'].cumsum()
@@ -158,23 +46,7 @@ non_symbol_transactions['cumulative_total'] = non_symbol_transactions.groupby('t
 # Merge symbol and non-symbol transactions back together
 transactions = pd.concat([symbol_transactions, non_symbol_transactions], ignore_index=True)
 
-# Calculate cash flow for each transaction
-def calculate_cash(row):
-    if row['type'] == 'buy':
-        return -row['total_cost']
-    elif row['type'] == 'sell':
-        return row['sales_proceeds']
-    elif row['type'] == 'dividend':
-        return row['net_amount']
-    elif row['type'] == 'deposit':
-        return row['net_amount']
-    elif row['type'] == 'withdrawal':
-        return row['net_amount']
-    elif row['type'] == 'fee':
-        return row['net_amount']
-    else:
-        return 0
-
+# Calculate cash for each transaction
 transactions['cash'] = transactions.apply(calculate_cash, axis=1)
 
 # Ensure the transactions are sorted by date
@@ -183,18 +55,8 @@ transactions = transactions.sort_values('date')
 # Compute cumulative cash value
 transactions['cumulative_cash'] = transactions['cash'].cumsum()
 
-# Load daily price data for each symbol in the portfolio
-symbols_list = symbols.tolist()
-prices = yf.download(symbols_list, start=start_date, end=end_date)['Adj Close']
-
-# Reset the index to create a column for the dates
-prices.reset_index(inplace=True)
-
-# Rename the date column to match the transactions dataframe
-prices = prices.rename(columns={'Date': 'date'}) # type: ignore
-
-# Melt the prices dataframe
-prices = prices.melt(id_vars='date', var_name='symbol', value_name='adj_close')
+# Load daily price data for each symbol
+prices = load_daily_prices(symbols, start_date, end_date)
 
 # Merge the transactions and prices dataframes
 transactions = pd.merge(transactions, prices, how='left', on=['symbol', 'date'])
@@ -202,80 +64,65 @@ transactions = pd.merge(transactions, prices, how='left', on=['symbol', 'date'])
 # Identify the latest date with available closing price
 last_valid_date = transactions['date'].loc[transactions['adj_close'].notnull()].iloc[-1]
 
-# Remove the time component from dates
-transactions['date'] = transactions['date'].dt.date
-
 # Forward fill the adjusted closing prices
 transactions['adj_close'] = transactions.groupby('symbol')['adj_close'].ffill()
 
-# Calculate daily values of each holding
-transactions['daily_value'] = transactions['cumulative_quantity'] * transactions['adj_close']
+# For each holding, calculate unrealized and total gains/losses, unrealized and total returns
+transactions = calculate_holding_metrics(transactions)
 
-# Calculate daily portfolio value including cash
-portfolio_value = transactions.groupby('date').apply(lambda x: x['daily_value'].sum() + x['cumulative_cash'].iloc[-1])
-
-# Change column name to 'Portfolio Value'
-portfolio_value = portfolio_value.rename('Portfolio Value')
-
-# Convert date index to datetime
-portfolio_value.index = pd.to_datetime(portfolio_value.index)
-
-# Calculate daily portfolio returns
-portfolio_returns = portfolio_value.pct_change().dropna()
-
-# Change column name to 'Portfolio Return'
-portfolio_returns = portfolio_returns.rename('Portfolio Return')
+# Calculate daily portfolio value (including cash) and portfolio returns
+portfolio_value, portfolio_returns = calculate_daily_portfolio_returns(transactions)
 
 # Create a summary dataframe
-summary = transactions.groupby('symbol').last()
-
-# Rename columns
-summary = summary.rename(columns={'symbol': 'Symbol', 'cumulative_quantity': 'Quantity', 'adj_close': 'Current Price', 'daily_value': 'Current Value',
-                        'realized_returns': 'Realized Return', 'dividends': 'Dividends Received'})
-
-# Sort the holdings by quantity
-summary = summary.sort_values('Quantity', ascending=False)
-
-# # Add the latest cash value to the summary dataframe
-# summary.loc['Cash', 'Current Value'] = transactions['cumulative_cash'].iloc[-1]
-
-# Create a dataframe for cash
-cash_df = pd.DataFrame(index=['Cash'], columns=['Current Value'])
-cash_df.loc['Cash', 'Current Value'] = transactions['cumulative_cash'].iloc[-1]
-
-# Concatenate cash_df with the rest of the summary dataframe
-summary = pd.concat([cash_df, summary])
+summary = create_summary_table(transactions)
 
 # Show only the columns we're interested in
-summary = summary[['Quantity', 'Current Price', 'Current Value', 'Realized Return', 'Dividends Received']]
+summary = summary[
+    ['Quantity', 'Current Price', 'Current Value', 'Allocation', 'Realized Gain/Loss', 'Realized Return', 'Unrealized Gain/Loss',
+     'Unrealized Return', 'Dividends Collected']
+     ]
 
-# Convert realized returns to percentages and round to two decimal places
-summary['Realized Return'] = summary['Realized Return'].apply(lambda x: '{:.2%}'.format(x) if pd.notnull(x) else '-')
+# Convert allocation and realized returns to percentages and round to two decimal places
+summary[['Allocation', 'Realized Return', 'Unrealized Return']] = summary[['Allocation', 'Realized Return', 'Unrealized Return']].applymap(
+    lambda x: '{:.2%}'.format(x) if pd.notnull(x) else '-')
 
 # Round quantity to integer
 summary['Quantity'] = summary['Quantity'].apply(lambda x: '{:,.0f}'.format(x) if pd.notnull(x) else '-')
 
 # Round the other summary values to two decimal places and add thousands separators
-summary[['Current Price', 'Current Value', 'Dividends Received']] = summary[['Current Price', 'Current Value', 'Dividends Received']].applymap(
+summary[['Current Price', 'Current Value', 'Realized Gain/Loss', 'Unrealized Gain/Loss', 'Dividends Collected']] = summary[
+    ['Current Price', 'Current Value', 'Realized Gain/Loss', 'Unrealized Gain/Loss', 'Dividends Collected']].applymap(
     lambda x: '{:,.2f}'.format(x) if pd.notnull(x) else '-')
 
-# Calculate total return using the first and latest portfolio value (does not work if more cash has been deposited)
+# Calculate total return using the first and latest portfolio value (not meaningful if more cash has been deposited)
 total_return = portfolio_value.iloc[-1] / portfolio_value.iloc[0] - 1
 
-# Load daily price data for S&P 500 to use as a benchmark
-benchmark_daily = yf.download('^GSPC', start=start_date, end=end_date)['Adj Close']
+# Load daily price data for S&P 500 (^GSPC) to use as a benchmark
+benchmark_daily = load_benchmark_data(start_date, end_date)
 
-# Change column name to 'S&P 500'
-benchmark_daily = benchmark_daily.rename('S&P 500')
+# Merge daily portfolio value with benchmark
+portfolio_benchmark_daily = pd.merge(portfolio_value, benchmark_daily, how='left', left_index=True, right_index=True)
+
+# Forward fill the benchmark daily values
+portfolio_benchmark_daily['S&P 500'] = portfolio_benchmark_daily['S&P 500'].fillna(method='ffill')
+# st.dataframe(portfolio_benchmark_daily)
 
 # Calculate daily benchmark returns
-benchmark_returns_daily = benchmark_daily.pct_change().dropna()
+benchmark_returns_daily = portfolio_benchmark_daily['S&P 500'].pct_change().dropna()
 
 # Merge with portfolio returns to create a dataframe with both
 portfolio_benchmark_returns_daily = pd.merge(portfolio_returns, benchmark_returns_daily, how='left', left_index=True, right_index=True)
+portfolio_benchmark_returns_daily.columns = ['Portfolio Return', 'S&P 500 Return']
+# st.dataframe(portfolio_benchmark_returns_daily)
 
-# Fill NaN with zero for benchmark returns
-portfolio_benchmark_returns_daily['S&P 500'] = portfolio_benchmark_returns_daily['S&P 500'].fillna(0)
+# Calculate cumulative returns
+portfolio_cumulative_returns = (1 + portfolio_benchmark_returns_daily['Portfolio Return']).cumprod() - 1
+benchmark_cumulative_returns = (1 + portfolio_benchmark_returns_daily['S&P 500 Return']).cumprod() - 1
+# st.dataframe(benchmark_cumulative_returns)
+
+# Normalize cumulative returns to start at 100
+portfolio_cumulative_returns_normalized = 100 * (1 + portfolio_cumulative_returns)
+benchmark_cumulative_returns_normalized = 100 * (1 + benchmark_cumulative_returns)
 
 # Load daily 3-month Treasury Bill data to use as the risk-free rate
 rf = web.DataReader('TB3MS', 'fred',start=start_date, end=end_date)
@@ -283,10 +130,13 @@ rf = web.DataReader('TB3MS', 'fred',start=start_date, end=end_date)
 # Convert to monthly returns
 rf = (1 + (rf / 100)) ** (1 / 12) - 1 
 rf = rf.resample('M').last()
-# st.write(rf)
+# st.dataframe(rf)
 
 # Calculate monthly benchmark returns
 benchmark_returns_monthly = benchmark_daily.resample('M').last().pct_change().dropna()
+
+# Change column name to 'S&P500 Return'
+benchmark_returns_monthly = benchmark_returns_monthly.rename('S&P 500 Return')
 # st.write(benchmark_returns_monthly)
 
 # Calculate monthly portfolio returns
@@ -301,9 +151,9 @@ monthly_returns = rf.join(portfolio_returns_monthly, how='left').join(benchmark_
 
 # Calculate excess returns over risk-free rate
 monthly_returns['excess_return'] = monthly_returns['Portfolio Return'] - monthly_returns['TB3MS']
-st.write(monthly_returns)
+# st.write(monthly_returns)
 
-# Calculate standard deviation of excess returns
+# Calculate standard deviation of monthly excess returns
 std_monthly_excess_return = monthly_returns['excess_return'].std()
 
 # Calculate realized Sharpe ratio for the period
@@ -317,22 +167,52 @@ st.title('Portfolio Dashboard')
 
 st.caption(f'Data provided as of market close on {last_valid_date: %m-%d-%Y}')
 
-col1, col2 = st.columns(2)
+metriccol1, metriccol2, metriccol3 = st.columns(3)
+with metriccol1:
+    st.metric(
+        label=f'Portfolio Value', 
+        value='${:,.0f}'.format(portfolio_value.iloc[-1]), 
+        delta='${:,.0f}'.format(portfolio_value.iloc[-1] - portfolio_value.iloc[0])
+        )
+with metriccol2:
+    st.metric(
+        label=f'Total Return',
+        value='{:.2%}'.format(total_return)
+        )
+with metriccol3:
+    st.metric(
+        label=f'Sharpe Ratio', 
+        value='{:.2f}'.format(sharpe_ratio)
+        )
 
-with col1:
-    st.subheader('Summary')
-    st.dataframe(summary)
+st.area_chart(data = portfolio_value)
 
-with col2:
-    metriccol1, metriccol2, metriccol3 = st.columns(3)
-    with metriccol1:
-        st.metric(label=f'Portfolio Value', value='${:,.0f}'.format(portfolio_value.iloc[-1]), delta='${:,.0f}'.format(portfolio_value.iloc[-1] - portfolio_value.iloc[0]))
-    with metriccol2:
-        st.metric(label=f'Total Return', value='{:.2%}'.format(total_return))
-    with metriccol3:
-        st.metric(label=f'Sharpe Ratio', value='{:.2f}'.format(sharpe_ratio))
-    st.area_chart(data = portfolio_value)
+st.subheader('Summary')
+st.dataframe(summary)
 
-# st.dataframe(portfolio_value)
 
-# st.dataframe(portfolio_returns)
+# Create traces
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=portfolio_cumulative_returns_normalized.index, y=portfolio_cumulative_returns_normalized,
+                    mode='lines', fill='tozeroy', name='Portfolio'))
+fig.add_trace(go.Scatter(x=benchmark_cumulative_returns_normalized.index, y=benchmark_cumulative_returns_normalized,
+                    mode='lines', fill='tozeroy', name='S&P 500'))
+
+fig.update_layout(title='Normalized Portfolio Cumulative Returns vs S&P 500')
+
+# Update y-axis to start from 100
+fig.update_yaxes(range=[80, max(max(portfolio_cumulative_returns_normalized), max(benchmark_cumulative_returns_normalized)+ 15)])
+
+st.plotly_chart(fig)
+
+
+# Create traces
+fig = go.Figure()
+fig.add_trace(go.Bar(x=monthly_returns.index, y=monthly_returns['Portfolio Return'],
+                    name='Portfolio'))
+fig.add_trace(go.Bar(x=monthly_returns.index, y=monthly_returns['S&P 500 Return'],
+                    name='S&P 500'))
+
+fig.update_layout(barmode='group', title='Portfolio and S&P 500 Monthly Returns')
+
+st.plotly_chart(fig)
