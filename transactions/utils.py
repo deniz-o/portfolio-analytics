@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
+from datetime import datetime
 import yfinance as yf
+import streamlit as st
 
 def load_and_preprocess_transactions(file_path):
     '''
@@ -31,6 +33,7 @@ def load_and_preprocess_transactions(file_path):
         transactions_raw['net_amount'].str.replace(',', ''), errors='coerce')
     transactions = transactions_raw[['date', 'symbol', 'description', 'net_amount',
                                      'quantity', 'price', 'fees']]
+    print(transactions)
     return transactions
 
 def categorize_transactions(row):
@@ -49,8 +52,9 @@ def categorize_transactions(row):
             return transaction_type
     return 'other'
 
+@st.cache_data
 def process_symbol_transactions(symbol_transactions, start_date, end_date):
-    """
+    '''
     Processes symbol transactions to perform calculations such as
     cumulative quantity, cost basis, realized returns, dividends collected
 
@@ -61,7 +65,7 @@ def process_symbol_transactions(symbol_transactions, start_date, end_date):
 
     Returns:
         DataFrame: Processed symbol transactions data
-    """
+    '''
     # Set date range and create a dataframe with daily data for each symbol
     date_range = pd.date_range(start=start_date, end=end_date)
     symbols = symbol_transactions.symbol.unique()
@@ -154,6 +158,7 @@ def process_symbol_transactions(symbol_transactions, start_date, end_date):
     return symbol_transactions
 
 def calculate_cash(row):
+    '''Calculates cash for each transaction'''
     cash = 0
     transaction_type = row['type']
     if transaction_type == 'buy':
@@ -163,6 +168,7 @@ def calculate_cash(row):
     return cash
 
 def load_daily_prices(symbols, start_date, end_date):
+    '''Loads daily price data for each symbol'''
     # Convert symbols to list if necessary
     symbols_list = symbols.tolist() if isinstance(symbols, pd.Series) else symbols
 
@@ -173,7 +179,7 @@ def load_daily_prices(symbols, start_date, end_date):
     prices.reset_index(inplace=True)
 
     # Rename the date column to match the transactions dataframe
-    prices = prices.rename(columns={'Date': 'date'})
+    prices = prices.rename(columns={'Date': 'date'}) # type: ignore
 
     # Melt the prices dataframe
     prices = prices.melt(id_vars='date', var_name='symbol', value_name='adj_close')
@@ -181,14 +187,16 @@ def load_daily_prices(symbols, start_date, end_date):
     return prices
 
 def calculate_holding_metrics(transactions):
+    '''Calculates unrealized and total gains/losses, unrealized and total returns'''
     transactions['daily_value'] = transactions['cumulative_quantity'] * transactions['adj_close']
     transactions['unrealized_gains'] = transactions['daily_value'] - transactions['cumulative_total_cost']
     transactions['unrealized_returns'] = transactions['unrealized_gains'] / transactions['cumulative_total_cost']
-    transactions['total_gains'] = transactions['realized_gains'] + transactions['unrealized_gains'] + transactions['dividends']
+    transactions['total_gains'] = transactions['realized_gains'].fillna(0) + transactions['unrealized_gains'] + transactions['dividends']
     transactions['total_returns'] = transactions['total_gains'] / (transactions['cumulative_total_cost'] + transactions.groupby('symbol')['sell_cost_basis'].cumsum())
     return transactions
 
 def calculate_daily_portfolio_returns(transactions):
+    '''Calculates daily portfolio value (including cash) and portfolio returns'''
     # Calculate daily portfolio value including cash
     portfolio_value = transactions.groupby('date').apply(lambda x: x['daily_value'].sum() + x['cumulative_cash'].iloc[-1])
 
@@ -207,6 +215,7 @@ def calculate_daily_portfolio_returns(transactions):
     return portfolio_value, portfolio_returns
 
 def create_summary_table(transactions):
+    '''Creates a summary table for the portfolio'''
     summary = transactions.groupby('symbol').last()
 
     # Rename columns
@@ -219,6 +228,8 @@ def create_summary_table(transactions):
         'realized_returns': 'Realized Return',
         'unrealized_gains': 'Unrealized Gain/Loss',
         'unrealized_returns': 'Unrealized Return',
+        'total_gains': 'Total Gain/Loss',
+        'total_returns': 'Total Return',
         'dividends': 'Dividends Collected'})
     
     summary = summary.sort_values('Quantity', ascending=False)
@@ -235,7 +246,9 @@ def create_summary_table(transactions):
 
     return summary
 
+@st.cache_data
 def load_benchmark_data(start_date, end_date):
+    '''Loads benchmark data'''
     # Load daily price data for S&P 500 to use as a benchmark
     benchmark_daily = yf.download('^GSPC', start=start_date, end=end_date)['Adj Close']
 
@@ -246,6 +259,3 @@ def load_benchmark_data(start_date, end_date):
     benchmark_daily.index = pd.to_datetime(benchmark_daily.index)
 
     return benchmark_daily
-
-
-

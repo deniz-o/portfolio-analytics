@@ -1,4 +1,5 @@
 import streamlit as st
 from Dashboard import transactions
 
-st.dataframe(transactions.set_index('date'))
+st.title('Transactions')
+st.dataframe(transactions.loc[transactions['type'].notna()].set_index('date'))
