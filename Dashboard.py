@@ -186,12 +186,15 @@ sharpe_ratio_monthly = monthly_returns['excess_return'].mean() / std_monthly_exc
 # Annualize Sharpe ratio
 sharpe_ratio = sharpe_ratio_monthly * np.sqrt(12)
 
+# Calculate maximum drawdown
+max_drawdown = (portfolio_value / portfolio_value.cummax() - 1).min()
+
 # Create streamlit display elements
 st.title('Portfolio Dashboard')
 
 st.caption(f'Data provided as of market close on {last_valid_date: %m-%d-%Y}')
 
-metriccol1, metriccol2, metriccol3 = st.columns(3)
+metriccol1, metriccol2, metriccol3, metriccol4 = st.columns(4)
 with metriccol1:
     st.metric(
         label=f'Portfolio Value', 
@@ -207,6 +210,11 @@ with metriccol3:
     st.metric(
         label=f'Sharpe Ratio', 
         value='{:.2f}'.format(sharpe_ratio)
+        )
+with metriccol4:
+    st.metric(
+        label=f'Max Drawdown',
+        value='{:.2%}'.format(max_drawdown)
         )
 
 st.area_chart(data = portfolio_value)
